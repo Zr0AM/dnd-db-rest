@@ -1,0 +1,27 @@
+/**
+ * For more details on how to configure Wrangler, refer to:
+ * https://developers.cloudflare.com/workers/wrangler/configuration/
+ */
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "dnd-db-rest",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-03-03",
+    "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "dnd-db",
+          "database_id": "5b91e506-75c8-42e6-97f0-61317e69ae8a"
+        }
+    ],
+    "secrets_store_secrets": [
+        {
+            "store_id": "054dccb20f304a36b0f041e9e560c5aa",
+            "binding": "SECRET",
+            "secret_name": "dnd-db-rest-secret"
+        }
+    ],
+	"observability": {
+		"enabled": true
+	}
+}
