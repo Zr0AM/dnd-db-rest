@@ -59,6 +59,11 @@ export default {
             return next();
         };
 
+        // Add a root endpoint
+        app.get('/', (c) => {
+            return c.json({ status: 'ok', service: 'dnd-db-rest' });
+        });
+
         // CRUD REST endpoints made available to all of our tables
         app.all('/rest/*', authMiddleware, handleRest);
 
