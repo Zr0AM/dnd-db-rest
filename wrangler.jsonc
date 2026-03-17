@@ -21,6 +21,12 @@
             "secret_name": "dnd-db-rest-secret"
         }
     ],
+	"routes": [
+    {
+      "pattern": "dnd-service.omnomnom.org",
+      "custom_domain": true
+    }
+  ]
 	"observability": {
 		"enabled": true
 	}
