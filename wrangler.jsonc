@@ -43,4 +43,10 @@
       "persist": true
     }
   },
+  "pipelines": [
+    {
+      "pipeline": "8765aea44a85447ca196ffe6544f0453",
+      "binding": "LOGPUSH_WORKERS_TRACE_EVENTS_STRATUS_STREAM"
+    }
+  ]
 }
