@@ -53,17 +53,24 @@ const safeEqual = async (a: string, b: string): Promise<boolean> => {
 // is sent in on each request and matches the value of our Secret key.
 // If a match is not found we return a 401 and prevent further access.
 const authMiddleware = async (c: Context, next: Next) => {
-    // Secret Store key value that we have set
-    const secret = await c.env.SECRET.get();
-
-    const authHeader = c.req.header('Authorization');
+    // Check the request first so unauthenticated calls never reach the Secrets Store
+    const authHeader = c.req.header('Authorization')?.trim();
     if (!authHeader) {
         return unauthorized(c);
     }
 
-    const token = authHeader.startsWith('Bearer ')
-        ? authHeader.substring(7)
-        : authHeader;
+    // `Bearer <token>` (scheme is case-insensitive) or the bare token
+    const token = authHeader.replace(/^bearer(\s+|$)/i, '').trim();
+    if (!token) {
+        return unauthorized(c);
+    }
+
+    // Secret Store key value that we have set. A failure here propagates to onError (500).
+    const secret = await c.env.SECRET.get();
+    if (!secret) {
+        console.error('The API secret is empty or missing');
+        return c.json({success: false, error: 'Server misconfigured'}, 500);
+    }
 
     if (!(await safeEqual(token, secret))) {
         return unauthorized(c);
@@ -99,6 +106,13 @@ app.post('/query', authMiddleware, async (c) => {
     } catch (error: any) {
         return c.json({error: error.message}, 500);
     }
+});
+
+// Unknown routes and unexpected errors use the same JSON error shape as everything else
+app.notFound((c) => c.json({success: false, error: 'Not found'}, 404));
+app.onError((error, c) => {
+    console.error('Unhandled error:', error);
+    return c.json({success: false, error: 'Internal server error'}, 500);
 });
 
 export default app;
