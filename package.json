@@ -13,9 +13,15 @@
 		"@cloudflare/vitest-pool-workers": "^0.22.0",
 		"typescript": "^5.5.2",
 		"vitest": "^4.1.11",
-		"wrangler": "^4.100.0"
+		"wrangler": "^4.145.0"
 	},
 	"dependencies": {
-		"hono": "^4.7.5"
+		"hono": "^4.13.12"
+	},
+	"overrides": {
+		"@cloudflare/vitest-pool-workers": {
+			"wrangler": "$wrangler",
+			"miniflare": "5.20260930.0-alpha"
+		}
 	}
 }
