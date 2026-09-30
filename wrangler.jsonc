@@ -11,7 +11,8 @@
         {
           "binding": "DB",
           "database_name": "dnd-db",
-          "database_id": "5b91e506-75c8-42e6-97f0-61317e69ae8a"
+          "database_id": "5b91e506-75c8-42e6-97f0-61317e69ae8a",
+          "migrations_dir": "migrations"
         }
     ],
     "secrets_store_secrets": [

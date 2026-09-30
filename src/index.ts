@@ -7,25 +7,26 @@ export interface Env {
     SECRET: SecretsStoreSecret;
 }
 
-// # List all users
-// GET /rest/users
+// # List all items (the active flag is stored as 0/1)
+// GET /rest/Item?active=1
 
-// # Get filtered and sorted users
-// GET /rest/users?age=25&sort_by=name&order=desc
+// # List items without the long description text, sorted and paginated
+// GET /rest/Item?active=1&fields=itemID,itemName,itemRarity,itemCost&sort_by=itemName&order=asc&limit=50&offset=100
 
-// # Get paginated results
-// GET /rest/users?limit=10&offset=20
+// # Get one item (by its primary key, itemID) including the description
+// GET /rest/Item/42
+// GET /rest/Item/42?fields=itemID,itemName,itemDescription
 
-// # Create a new user
-// POST /rest/users
-// { "name": "John", "age": 30 }
+// # Create an item (itemID is not auto-generated, the client must supply it)
+// POST /rest/Item
+// { "itemID": 2000, "itemName": "Bag of Holding", "itemRarity": "Uncommon", "itemCost": 500 }
 
-// # Update a user
-// PATCH /rest/users/123
-// { "age": 31 }
+// # Update an item
+// PATCH /rest/Item/42
+// { "itemCost": 750 }
 
-// # Delete a user
-// DELETE /rest/users/123
+// # Delete an item
+// DELETE /rest/Item/42
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -33,6 +34,20 @@ const app = new Hono<{ Bindings: Env }>();
 app.use('*', async (c, next) => {
     return cors()(c, next);
 })
+
+const unauthorized = (c: Context) => c.json({success: false, error: 'Unauthorized'}, 401);
+
+// Constant-time string comparison. Both values are hashed first so the
+// comparison always runs over equal-length buffers and does not leak the
+// length of the secret.
+const safeEqual = async (a: string, b: string): Promise<boolean> => {
+    const encoder = new TextEncoder();
+    const [hashA, hashB] = await Promise.all([
+        crypto.subtle.digest('SHA-256', encoder.encode(a)),
+        crypto.subtle.digest('SHA-256', encoder.encode(b)),
+    ]);
+    return crypto.subtle.timingSafeEqual(hashA, hashB);
+};
 
 // Authentication middleware that verifies the Authorization header
 // is sent in on each request and matches the value of our Secret key.
@@ -43,15 +58,15 @@ const authMiddleware = async (c: Context, next: Next) => {
 
     const authHeader = c.req.header('Authorization');
     if (!authHeader) {
-        return c.json({error: 'Unauthorized'}, 401);
+        return unauthorized(c);
     }
 
     const token = authHeader.startsWith('Bearer ')
         ? authHeader.substring(7)
         : authHeader;
 
-    if (token !== secret) {
-        return c.json({error: 'Unauthorized'}, 401);
+    if (!(await safeEqual(token, secret))) {
+        return unauthorized(c);
     }
 
     return next();
