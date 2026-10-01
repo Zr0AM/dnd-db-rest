@@ -3,10 +3,11 @@
 The data API behind Adventurer's Ledger, a D&D magic-item marketplace. It is a small
 Cloudflare Worker (Hono) that exposes a token-protected REST API over a Cloudflare D1
 (SQLite) database named `dnd-db`. The main table is `Item`, the catalogue of magic items
-(1,393 rows at the time of writing).
+(about 1,400 rows at the time of writing: 1,393).
 
 - Runtime: Cloudflare Workers, Hono, D1 binding `DB`, Secrets Store binding `SECRET`
-- Code: `src/index.ts` (routing, CORS, auth), `src/rest.ts` (generic CRUD handlers)
+- Code: `src/index.ts` (routing, CORS, auth, `/query`), `src/rest.ts` (generic CRUD
+  handlers and the table allowlist), `src/sql-guard.ts` (read-only check for `/query`)
 - Custom domain: `dnd-service.omnomnom.org` (see `wrangler.jsonc`)
 
 ## Quick start
@@ -24,44 +25,57 @@ curl 'https://dnd-service.omnomnom.org/rest/Item/42' \
 ## Authentication
 
 Every route under `/rest/*` and `/query` requires the shared secret, either as a Bearer
-token or as the bare value of the `Authorization` header:
+token (the `Bearer` scheme is case-insensitive) or as the bare value of the
+`Authorization` header:
 
 ```
 Authorization: Bearer <YOUR-SECRET-VALUE>
 ```
 
 The secret lives in the Cloudflare Secrets Store (`dnd-db-rest-secret`) and is compared in
-constant time. A missing or wrong token returns `401`. `GET /` is an open status check.
+constant time. The header is checked before the Secrets Store is read, so unauthenticated
+requests never cost a Secrets Store call. A missing or wrong token returns `401`; an empty
+or missing secret returns `500 Server misconfigured` and can never authenticate.
+`GET /` is an open status check.
 
 ## REST endpoints
 
-`{table}` is a table name; the table is used as given (only letters, digits and `_` are kept).
-`{id}` is the value of the table's primary key.
+`{table}` is the name of an allowlisted table (see below), matched case-insensitively.
+`{id}` is the integer value of the table's primary key. Path segments are URL-decoded
+(`/rest/It%65m` is `/rest/Item`); extra or empty segments (`/rest/Item/1/x`, `/rest//Item`)
+are `404`, malformed percent-encoding is `400`.
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/rest/{table}` | List rows, with filters, sorting, pagination, projection |
 | GET | `/rest/{table}/{id}` | Get one row by primary key (returns a `results` array with 0 or 1 row) |
-| POST | `/rest/{table}` | Insert a row from a JSON object (`201`) |
+| POST | `/rest/{table}` | Insert a row from a JSON object (`201`); the primary key is required |
 | PATCH / PUT | `/rest/{table}/{id}` | Update the given columns of a row (both behave the same: a partial update) |
 | DELETE | `/rest/{table}/{id}` | Delete a row |
-| POST | `/query` | Raw parameterised SQL (see Security notes) |
+| POST | `/query` | Raw parameterised **read-only** SQL (see below) |
 
-### Primary key
+### Table allowlist and primary key
 
-By-id routes (GET, PATCH, PUT, DELETE) use a per-table primary-key column, defined in the
-`PRIMARY_KEYS` map in `src/rest.ts`:
+Only tables listed in the `TABLES` object in `src/rest.ts` are reachable. Every other
+name (`sqlite_master`, `d1_migrations`, `_cf_*`, a typo, ...) answers `404` for every
+method and cannot be read or written. Each entry names the table's primary-key column,
+which the by-id routes use:
 
 | Table | Primary key |
 |-------|-------------|
 | `Item` | `itemID` |
-| any other table | `id` |
 
-So `GET /rest/Item/42` runs `SELECT * FROM Item WHERE itemID = ?`. To support a new table
-whose key is not `id`, add it to `PRIMARY_KEYS` (use a lower-case table name as the key).
+So `GET /rest/Item/42` runs `SELECT * FROM "Item" WHERE "itemID" = ? LIMIT ?`. To expose a
+new table, add it to `TABLES` with its primary-key column. Table names must match
+`^[A-Za-z_][A-Za-z0-9_]*$`.
 
+Primary keys are integers. A path id (and an `itemID=` filter value) must match
+`^-?\d+$`, so `/rest/Item/1.0` and `/rest/Item/1e0` are `400` rather than matching item 1.
 `itemID` is declared `int ... primary key`, which in SQLite is **not** an auto-incrementing
-rowid alias. Clients must supply `itemID` when creating an item.
+rowid alias and does allow `NULL`. Clients must therefore supply an integer `itemID` on
+POST (a missing or null key is `400`), and PATCH/PUT refuses to set it to null or to a
+non-integer. Migration `0002_item_id_guard.sql` adds database triggers that enforce the
+same rule for any other writer.
 
 ### Query parameters (GET)
 
@@ -70,13 +84,27 @@ rowid alias. Clients must supply `itemID` when creating an item.
 | `fields` | Comma-separated columns to return instead of `*`. Works on list and by-id. An empty or invalid list returns `400`. | `fields=itemID,itemName` |
 | `sort_by` | Column to sort by | `sort_by=itemName` |
 | `order` | `asc` (default) or `desc` | `order=desc` |
-| `limit` | Maximum rows to return. Non-negative integer, else `400`. | `limit=50` |
+| `limit` | Maximum rows to return. Non-negative integer, at most `5000` (above that is `400`). Default `2000`. An empty value (`limit=`) means "not given". | `limit=50` |
 | `offset` | Rows to skip. Non-negative integer, else `400`. May be used without `limit`. | `offset=100` |
 | any other name | Equality filter on that column | `active=1`, `itemRarity=Rare` |
 
-`fields`, `sort_by`, `order`, `limit` and `offset` are reserved and never treated as filters.
-Filters are equality-only and are combined with AND. Values are bound as strings and
-SQLite's column affinity converts them (so `active=1` matches the integer `1`).
+`fields`, `sort_by`, `order`, `limit` and `offset` are reserved and never treated as
+filters; they are matched case-insensitively (`?Limit=1` works), and sending the same
+reserved name twice is `400`. Filters are equality-only and are combined with AND. Values
+are bound as strings and SQLite's column affinity converts them (so `active=1` matches the
+integer `1`).
+
+Column names (in `fields`, `sort_by`, filters and write bodies) are matched exactly,
+case-sensitively, against the table's real columns (`PRAGMA table_info`, cached per
+Worker isolate and re-read once when a name is not found, so a column added by a
+migration is picked up). A name with anything other than letters, digits and `_` is `400
+Invalid parameter name` / `Invalid column name` (it is never rewritten into another
+name), and an unknown column is `400 Unknown column: x`. Identifiers are double-quoted in
+the generated SQL, so keyword-named columns work.
+
+Limits: the catalogue is about 1.4k rows and the default `limit` is 2000, so an
+unparameterised `GET /rest/Item` still returns everything. The maximum of 5000 is a safety
+net, not something clients are expected to reach.
 
 The list view can omit the long `itemDescription` text with `fields=` and a by-id request
 can fetch it:
@@ -89,7 +117,10 @@ GET /rest/Item/42?fields=itemID,itemName,itemDescription
 ### Writing
 
 POST, PATCH and PUT take a JSON object whose keys are column names. The body must be valid
-JSON, a non-empty object, with valid column names; otherwise the response is `400`.
+JSON and a non-empty object. Values may only be strings, finite numbers, booleans (stored
+as 1/0) or `null`; arrays, objects and non-finite numbers are `400` naming the offending
+column. Columns with integer affinity (`itemID`, `itemCost`, `active`) take whole numbers
+(or numeric text such as `"5"`); `{"itemCost": "abc"}` is `400`.
 
 ```bash
 curl -X POST 'https://dnd-service.omnomnom.org/rest/Item' \
@@ -103,7 +134,38 @@ curl -X PATCH 'https://dnd-service.omnomnom.org/rest/Item/2000' \
   --data '{"itemCost": 750}'
 ```
 
-Update and delete succeed (`200`) even when no row matches the id.
+PATCH, PUT and DELETE on an id that does not exist return `404 Not found` (and change
+nothing).
+
+### Raw query: `POST /query` (read-only)
+
+```bash
+curl -X POST 'https://dnd-service.omnomnom.org/query' \
+  --header 'Authorization: Bearer <YOUR-SECRET-VALUE>' \
+  --header 'Content-Type: application/json' \
+  --data '{"query": "SELECT itemID, itemName FROM Item WHERE active = ? LIMIT 5", "params": [1]}'
+```
+
+`/query` only runs a **single SELECT or WITH (read-only CTE) statement**; `params` (an array
+of strings, numbers, booleans or null) are bound as before and allowed queries return D1's
+raw result object. Anything else is refused with `403
+{"success": false, "error": "Only read-only queries are allowed"}` before it reaches the
+database:
+
+- statements that do not start with `SELECT` or `WITH` (INSERT, UPDATE, DELETE, REPLACE,
+  DROP, ALTER, CREATE, PRAGMA, ATTACH, VACUUM, EXPLAIN, ...), also after leading comments
+  or whitespace and in any letter case;
+- more than one statement (a `;` followed by anything but whitespace and comments);
+- those write/DDL/PRAGMA keywords anywhere in the statement outside string literals,
+  quoted identifiers and comments (so `WITH x AS (...) DELETE ...` is refused, while
+  `replace(x, 'a', 'b')` and `'DROP TABLE'` inside a string are fine);
+- any reference to a name starting with `sqlite_`, `d1_` or `_cf_`, or to `pragma_*`
+  functions.
+
+The check is deliberately conservative (it can refuse an odd but harmless query). **Data
+changes and schema changes (DDL) must go through `wrangler d1 execute`, not through the
+API.** An SQL mistake in an allowed query is `400 Query could not be executed`; the database
+message is logged server-side only.
 
 ## Responses
 
@@ -126,7 +188,7 @@ Consumers (such as the Angular app) unwrap `results` from this object. POST retu
 
 ### Errors
 
-All errors from `/rest/*` and the auth check use the same shape:
+Every error uses the same shape, including unknown routes and unexpected failures:
 
 ```json
 { "success": false, "error": "Invalid limit. Expected a non-negative integer" }
@@ -134,12 +196,14 @@ All errors from `/rest/*` and the auth check use the same shape:
 
 | Status | Meaning |
 |--------|---------|
-| 400 | Bad input: invalid JSON or body, invalid `fields`, `limit` or `offset`, missing id on update/delete |
+| 400 | Bad input: invalid JSON, body, name, value, id, `fields`, `limit` or `offset`; unknown column; missing id on update/delete; missing primary key on POST |
 | 401 | Missing or wrong token |
-| 405 | Method not allowed |
-| 500 | Database error (for example unknown table or column, constraint violation) |
-
-The raw `/query` route keeps its original `{"error": "..."}` body (no `success` flag).
+| 403 | `/query` statement is not read-only |
+| 404 | Unknown route, unknown or non-allowlisted table, extra path segments, or no row with that id (PATCH/PUT/DELETE) |
+| 405 | Method not allowed on `/rest/*` |
+| 409 | Duplicate primary key (or other UNIQUE constraint) |
+| 422 | A table constraint failed (for example `active` must be 0 or 1, or a NOT NULL column was set to null) |
+| 500 | Unexpected error (generic message; the detail is logged with `console.error`, never returned), or `Server misconfigured` when the secret is empty |
 
 ## Schema: `Item`
 
@@ -147,7 +211,7 @@ Live DDL (as captured from the production database; see `migrations/0001_baselin
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `itemID` | `int` | Primary key (`PK_tblItem`). Not auto-increment; supplied by the client. |
+| `itemID` | `int` | Primary key (`PK_tblItem`). Not auto-increment; supplied by the client. Never NULL (see `0002`). |
 | `itemName` | `nvarchar(150)` | |
 | `itemRarity` | `nvarchar(20)` | `Common`, `Uncommon`, `Rare`, `Very Rare`, `Legendary`, `Artifact`, `Varies`, `Unknown Rarity` |
 | `itemCost` | `int` | `0` means there is no fixed price |
@@ -168,39 +232,71 @@ Schema changes are SQL files in `migrations/`, applied in order with Wrangler's 
 migrations (`migrations_dir` is set on the `DB` entry in `wrangler.jsonc`).
 
 ```bash
-# Create a new migration file (migrations/0002_<name>.sql)
+# Create a new migration file (migrations/0003_<name>.sql)
 npx wrangler d1 migrations create DB add_something
 
 # See what is pending, and apply, against the LOCAL database
 npx wrangler d1 migrations list DB --local
-npx wrangler d1 migrations apply DB --local
+npx wrangler d1 migrations apply dnd-db --local
 ```
 
-`0001_baseline.sql` describes the schema that already exists in production, using
-`CREATE TABLE IF NOT EXISTS Item (...)` with all 14 columns. On the existing database it
-is a **no-op** (the table is already there, nothing is changed or dropped); it only
-makes Wrangler record the baseline in its `d1_migrations` bookkeeping table. On a fresh
-database (local dev, tests) it creates the table. Applying migrations to the remote
-database (`--remote`) is a deliberate owner action and is never done by the tests.
+- `0001_baseline.sql` describes the schema that already exists in production, using
+  `CREATE TABLE IF NOT EXISTS Item (...)` with all 14 columns. On the existing database it
+  is a **no-op** (the table is already there, nothing is changed or dropped); it only
+  makes Wrangler record the baseline in its `d1_migrations` bookkeeping table. On a fresh
+  database (local dev, tests) it creates the table.
+- `0002_item_id_guard.sql` creates two triggers (`CREATE TRIGGER IF NOT EXISTS`, so it is
+  idempotent) that abort any INSERT or `UPDATE OF itemID` that would leave `itemID` NULL.
+  It does not look at existing rows; before applying it to a database that may contain
+  orphans run `SELECT COUNT(*) FROM Item WHERE itemID IS NULL`.
 
-Because the baseline keeps the exact live column definitions, do not edit it after it has
-been applied anywhere; add a new numbered migration instead.
+Applying migrations to the remote database (`--remote`) is a deliberate owner action and is
+never done by the tests. Do not edit a migration after it has been applied anywhere; add a
+new numbered migration instead.
 
 ## Development and tests
 
 ```bash
 npm install
-npm run dev        # wrangler dev
-npm test           # vitest run
 npx tsc --noEmit   # type check
+npm test           # vitest run
 ```
+
+### Running the Worker locally (`wrangler dev`)
+
+`wrangler dev` uses a local D1 database and a local Secrets Store (both empty at first), so
+two one-time steps are needed:
+
+```bash
+# 1. Create the tables in the local database
+npx wrangler d1 migrations apply dnd-db --local
+
+# 2. Put a throwaway value in the LOCAL secrets store (local is the default; add
+#    --remote only if you really mean the real store, which you should not)
+npx wrangler secrets-store secret create 054dccb20f304a36b0f041e9e560c5aa \
+  --name dnd-db-rest-secret --scopes workers
+#   (prompts for the value; use any made-up string, it is only for local dev)
+
+npm run dev
+curl -H 'Authorization: Bearer <the-value-you-just-entered>' http://localhost:8787/rest/Item
+```
+
+Windows gotcha: the local state lives under `.wrangler/state` inside the project. When the
+project path is long (for example a deep worktree folder) the local D1 / Secrets Store
+commands can fail with `internal error` or `Network connection lost`. Point every local
+command at a short directory with `--persist-to`, e.g. `--persist-to C:/wrs`, and start the
+server with the same flag (`npx wrangler dev --persist-to C:/wrs`).
+
+### Test suite
 
 Tests use Vitest with `@cloudflare/vitest-pool-workers`: they run the real Worker code
 inside workerd (Miniflare) against a local, in-memory D1 database and a local secrets
-store. `test/setup.ts` applies `migrations/` and stores a throwaway test secret, so no network access to
-Cloudflare is needed, the real secret is never read, and the remote database is never
-touched (remote bindings are disabled in `vitest.config.mts`). Tests cover by-id
-GET/PATCH/DELETE on `Item`, filters, `fields`, `limit`/`offset`, invalid JSON, and auth.
+store. `test/setup.ts` applies every file in `migrations/` and stores a throwaway test
+secret, so no network access to Cloudflare is needed, the real secret is never read, and
+the remote database is never touched (remote bindings are disabled in
+`vitest.config.mts`). The suite covers by-id GET/PATCH/DELETE on `Item`, filters, `fields`,
+`limit`/`offset`, body and name validation, injection attempts, the table allowlist, the
+migration triggers, the read-only `/query` guard, and authentication.
 
 Note: `vitest.config.mts` uses the `.mts` extension because the test pool package is
 ESM-only and this project is CommonJS by default.
@@ -209,17 +305,32 @@ ESM-only and this project is CommonJS by default.
 binding in `wrangler.jsonc` and was intentionally not regenerated here, because a
 regeneration rewrites the whole bundled runtime-types section (thousands of lines).
 
+### Dependencies
+
+Only `hono` (and `src/`) is bundled into the deployed Worker; wrangler, vitest and the
+test pool are development tooling. `package.json` has an `overrides` entry for
+`@cloudflare/vitest-pool-workers`: version 0.22.0 pins an exact `wrangler` and `miniflare`
+(which bring vulnerable `undici` and `sharp`), so they are forced to the top-level
+`wrangler` and the matching patched `miniflare` until the pool publishes a release that does
+it itself. Remove the override then. The lockfile is generated with npm 10 (the version in
+Cloudflare's build image); keep `npm ci` working under it.
+
+`wrangler.jsonc` sets `observability.redact_query_string` to `false`: supported by the
+current wrangler schema (the older 4.124 wrangler warned about it as unexpected). It means
+query strings, which carry the filter values, are kept in logs and traces.
+
 ## Security notes
 
-- Table and column names are sanitized (letters, digits and `_` only) and values are always
+- Table and column names are validated (letters, digits and `_` only, and they must be a
+  real column of an allowlisted table), identifiers are double-quoted and values are always
   bound as parameters, which protects against SQL injection through the REST routes.
-- There is **no table or column allowlist**. Any caller holding the token can read and
-  write any table in the database through `/rest/{table}`. This is an open decision for
-  the owner.
-- `POST /query` executes **arbitrary SQL** with the supplied parameters (including
-  `DROP TABLE` and other DDL). A single shared token guards everything, so any token
-  holder has full read/write/DDL access to the whole database. It has intentionally not
-  been restricted or removed yet; whether to restrict it is an open decision.
+- Only tables in `TABLES` can be reached through `/rest`. Adding a table to it is a
+  decision to expose all of its rows and columns to every token holder.
+- `POST /query` is read-only (see above) and cannot see `sqlite_*`, `d1_*` or `_cf_*`
+  tables, but it can still read every other table. Writes and DDL go through
+  `wrangler d1 execute`.
+- Unexpected database errors are logged (`console.error`) and returned as a generic 500;
+  raw SQLite text is never sent to the client.
 - The token is shared by all clients. Keep it out of browser code (the Angular app reaches
   this API through a Pages Function) and rotate it in the Secrets Store if it leaks.
 - CORS is open (`*`); access control relies on the token only.
