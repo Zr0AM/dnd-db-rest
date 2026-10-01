@@ -48,6 +48,13 @@ const ALLOWED: [string, string][] = [
 	["subquery", "SELECT itemName FROM Item WHERE itemID IN (SELECT itemID FROM Item WHERE active = 1)"],
 	["aggregate", "SELECT COUNT(*) AS n FROM Item"],
 	["an alias that looks like a keyword prefix", "SELECT itemName AS Replaced FROM Item"],
+	// Tokenizer parity: SQLite has no backslash escapes, and a `/*/` does not close its own comment
+	["a lone backslash in a string (SQLite has no backslash escapes)", "SELECT '\\' AS v"],
+	["a lone backslash in a double-quoted identifier", 'SELECT 1 AS "\\"'],
+	["a lone backslash in a backtick identifier", "SELECT 1 AS `\\`"],
+	["a lone backslash in a bracket identifier", "SELECT 1 AS [\\]"],
+	["a comment opener that cannot close itself", "SELECT 1 AS v /*/ DELETE FROM Item"],
+	["comment markers inside strings", "SELECT '/*' AS a, '*/' AS b, '--' AS c"],
 ];
 
 const REJECTED: [string, string][] = [
@@ -114,6 +121,31 @@ const REJECTED: [string, string][] = [
 	["_cf_METADATA", "SELECT * FROM _cf_METADATA"],
 	["pragma table-valued function", "SELECT * FROM pragma_table_info('Item')"],
 	["pragma function without arguments", "SELECT name FROM pragma_database_list"],
+	// Tokenizer parity: each of these is a REAL write in SQLite (checked with SQLite's authorizer). A scanner
+	// that treated a backslash as an escape, or mis-read one quote style inside another, would hide the write.
+	["backslash in a single-quoted string hides a DELETE", "WITH x AS (SELECT '\\') DELETE FROM Item WHERE '\\' = '\\'"],
+	["backslash in a double-quoted identifier hides a DELETE", 'WITH x AS (SELECT 1 AS "\\") DELETE FROM Item WHERE itemID IN (SELECT "\\" FROM x)'],
+	["backslash in a backtick identifier hides a DELETE", "WITH x AS (SELECT 1 AS `\\`) DELETE FROM Item WHERE itemID IN (SELECT `\\` FROM x)"],
+	["backslash in a bracket identifier hides a DELETE", "WITH x AS (SELECT 1 AS [\\]) DELETE FROM Item WHERE itemID IN (SELECT [\\] FROM x)"],
+	["backslash string followed by a second statement", "SELECT '\\'; DELETE FROM Item; --'"],
+	["backslash string followed by an UPDATE", "WITH x AS (SELECT '\\') UPDATE Item SET itemCost = 1 WHERE '\\' = '\\'"],
+	["backslash string followed by an INSERT", "WITH x AS (SELECT '\\') INSERT INTO Item (itemID, itemName) SELECT 900, '\\' FROM x"],
+	["backslash string followed by a DROP", "SELECT '\\'; DROP TABLE Item; --'"],
+	["single quote inside a double-quoted alias", "WITH x AS (SELECT 1 AS \"'\") DELETE FROM Item WHERE itemID IN (SELECT \"'\" FROM x)"],
+	["single quote inside a backtick alias", "WITH x AS (SELECT 1 AS `'`) DELETE FROM Item WHERE itemID IN (SELECT `'` FROM x)"],
+	["single quote inside a bracket alias", "WITH x AS (SELECT 1 AS [']) DELETE FROM Item WHERE itemID IN (SELECT ['] FROM x)"],
+	["double quote inside a single-quoted string", "WITH x AS (SELECT '\"') DELETE FROM Item WHERE '\"' = '\"'"],
+	["backtick inside a single-quoted string", "WITH x AS (SELECT '`') DELETE FROM Item WHERE '`' = '`'"],
+	["bracket inside a single-quoted string", "WITH x AS (SELECT '[') DELETE FROM Item WHERE '[' = '['"],
+	["closing bracket inside a double-quoted alias", 'WITH x AS (SELECT 1 AS "]") DELETE FROM Item WHERE itemID IN (SELECT "]" FROM x)'],
+	["doubled single quotes inside a string", "WITH x AS (SELECT 'it''s') DELETE FROM Item WHERE 'it''s' = 'it''s'"],
+	["doubled double quotes inside an identifier", 'WITH x AS (SELECT 1 AS "a""b") DELETE FROM Item WHERE itemID IN (SELECT "a""b" FROM x)'],
+	["comment marker inside a quoted alias", 'WITH x AS (SELECT 1 AS "--") DELETE FROM Item WHERE itemID IN (SELECT "--" FROM x)'],
+	["block-comment opener inside a quoted alias", 'WITH x AS (SELECT 1 AS "/*") DELETE FROM Item WHERE itemID IN (SELECT "/*" FROM x) /* */'],
+	["semicolon inside a quoted alias before a real second statement", 'SELECT 1 AS ";"; DELETE FROM Item'],
+	["quote inside a line comment before a DELETE", "WITH x AS (SELECT 1) -- '\nDELETE FROM Item"],
+	["quote inside a block comment before a DELETE", "WITH x AS (SELECT 1) /* ' */ DELETE FROM Item /* ' */"],
+	["form feed between WITH and DELETE", "WITH x AS (SELECT 1)\fDELETE FROM Item"],
 ];
 
 // Each forbidden keyword on its own, hidden behind a WITH prefix (so only the keyword scan
@@ -133,6 +165,9 @@ describe("POST /query (read-only)", () => {
 		expect(body.success).toBe(true);
 		expect(Array.isArray(body.results)).toBe(true);
 		expect(body.meta).toBeDefined();
+		// An approved statement must really be a read: nothing in the table may have changed
+		expect(await itemCount()).toBe(4);
+		expect((await itemRow(1))!.itemName).toBe("Bag of Holding");
 	});
 
 	it("returns D1's raw result shape", async () => {
