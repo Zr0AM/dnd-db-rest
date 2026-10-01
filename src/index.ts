@@ -1,6 +1,7 @@
 import { Hono, Context, Next } from "hono";
 import { cors } from "hono/cors";
 import { handleRest } from './rest';
+import { isReadOnlyQuery } from './sql-guard';
 
 export interface Env {
     DB: D1Database;
@@ -34,6 +35,9 @@ const app = new Hono<{ Bindings: Env }>();
 app.use('*', async (c, next) => {
     return cors()(c, next);
 })
+
+const isBindable = (v: unknown) =>
+    v === null || ['string', 'number', 'boolean'].includes(typeof v);
 
 const unauthorized = (c: Context) => c.json({success: false, error: 'Unauthorized'}, 401);
 
@@ -87,24 +91,40 @@ app.get('/', (c) => {
 // CRUD REST endpoints made available to all of our tables
 app.all('/rest/*', authMiddleware, handleRest);
 
-// Execute a raw SQL statement with parameters with this route
+// Execute a raw READ-ONLY SQL statement (SELECT / WITH) with parameters with this route.
+// Writes and DDL are refused: use `wrangler d1 execute` for those.
 app.post('/query', authMiddleware, async (c) => {
+    let body: any;
     try {
-        const body = await c.req.json();
-        const {query, params} = body;
+        body = await c.req.json();
+    } catch {
+        return c.json({success: false, error: 'Invalid JSON body'}, 400);
+    }
+    const query = body?.query;
+    const params = body?.params ?? [];
 
-        if (!query) {
-            return c.json({error: 'Query is required'}, 400);
-        }
+    if (typeof query !== 'string' || !query.trim()) {
+        return c.json({success: false, error: 'Query is required'}, 400);
+    }
+    if (!Array.isArray(params) || !params.every(isBindable)) {
+        return c.json({success: false, error: 'params must be an array of strings, numbers, booleans or null'}, 400);
+    }
 
+    if (!isReadOnlyQuery(query)) {
+        return c.json({success: false, error: 'Only read-only queries are allowed'}, 403);
+    }
+
+    try {
         // Execute the query against D1 database
         const results = await c.env.DB.prepare(query)
-            .bind(...(params || []))
+            .bind(...params.map((v: unknown) => typeof v === 'boolean' ? Number(v) : v))
             .all();
 
         return c.json(results);
     } catch (error: any) {
-        return c.json({error: error.message}, 500);
+        // Usually a mistake in the SQL: log the detail, do not echo raw database text
+        console.error('Query failed:', error?.message);
+        return c.json({success: false, error: 'Query could not be executed'}, 400);
     }
 });
 
