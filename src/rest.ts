@@ -11,9 +11,17 @@ type RestContext = Context<{ Bindings: Env }>;
  * answers 404 and can be neither read nor written. The keys are the exact table names
  * used in SQL; the URL is matched case-insensitively (SQLite table names are).
  * Primary keys are integers that the client supplies (they are required on POST).
+ * `readOnly` tables (and views) answer 405 to anything but GET.
  */
-export const TABLES: Record<string, { primaryKey: string }> = {
+export const TABLES: Record<string, { primaryKey: string; readOnly?: boolean }> = {
     Item: { primaryKey: 'itemID' },
+    // SRD game data: list views for browsing, base tables for full detail by id.
+    SpellListView: { primaryKey: 'spellID', readOnly: true },
+    MonsterListView: { primaryKey: 'monsterID', readOnly: true },
+    EquipmentListView: { primaryKey: 'equipmentID', readOnly: true },
+    Spell: { primaryKey: 'spellID', readOnly: true },
+    Monster: { primaryKey: 'monsterID', readOnly: true },
+    Equipment: { primaryKey: 'equipmentID', readOnly: true },
 };
 
 /** `limit` applied when the request has none, and the largest `limit` accepted. */
@@ -385,10 +393,12 @@ async function handleDelete(c: RestContext, table: string, primaryKey: string, i
 }
 
 /** Finds an allowlisted table by name, case-insensitively. Returns its exact name and key. */
-function findTable(name: string): { table: string; primaryKey: string } | undefined {
+function findTable(name: string): { table: string; primaryKey: string; readOnly: boolean } | undefined {
     const lower = name.toLowerCase();
     const table = Object.keys(TABLES).find(key => key.toLowerCase() === lower);
-    return table === undefined ? undefined : { table, primaryKey: TABLES[table].primaryKey };
+    return table === undefined
+        ? undefined
+        : { table, primaryKey: TABLES[table].primaryKey, readOnly: TABLES[table].readOnly === true };
 }
 
 /**
@@ -419,7 +429,13 @@ export async function handleRest(c: RestContext): Promise<Response> {
     if (!found) {
         return errorResponse(c, 'Not found', 404);
     }
-    const { table, primaryKey } = found;
+    const { table, primaryKey, readOnly } = found;
+
+    if (readOnly && c.req.method !== 'GET') {
+        const response = errorResponse(c, 'Method not allowed', 405);
+        response.headers.set('Allow', 'GET');
+        return response;
+    }
 
     let id: number | undefined;
     if (idSegment !== undefined) {

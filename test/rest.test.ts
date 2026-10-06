@@ -664,6 +664,18 @@ describe("other allowlisted tables", () => {
 		expect(((await (await call("/rest/Thing")).json()) as any).results).toEqual([]);
 	});
 
+	it("answers 405 to writes on readOnly tables but still reads them", async () => {
+		TABLES.Thing = { primaryKey: "id", readOnly: true };
+		await env.DB.exec("INSERT INTO Thing (id, name) VALUES (1, 'a')");
+		expect(((await (await call("/rest/Thing/1")).json()) as any).results[0].name).toBe("a");
+		for (const [method, path] of [["POST", "/rest/Thing"], ["PATCH", "/rest/Thing/1"], ["PUT", "/rest/Thing/1"], ["DELETE", "/rest/Thing/1"]]) {
+			const res = await send(method, path, { id: 2, name: "b" });
+			expect(res.status, `${method} ${path}`).toBe(405);
+			expect(res.headers.get("Allow")).toBe("GET");
+		}
+		expect(((await (await call("/rest/Thing")).json()) as any).results).toHaveLength(1);
+	});
+
 	it("also requires the primary key on POST", async () => {
 		await expectError(await send("POST", "/rest/Thing", { name: "a" }), 400, "Missing primary key: id");
 	});
