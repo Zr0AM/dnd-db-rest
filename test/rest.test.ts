@@ -7,6 +7,9 @@ const ITEM_COLUMNS = [
 	"itemID", "itemName", "itemRarity", "itemCost", "itemType", "itemRestrictions",
 	"itemAttunement", "itemSource", "itemUrl", "itemVisualDesc", "itemShopkeeperDesc",
 	"active", "itemDescription", "itemDescriptionSource",
+	// added by 0003_game_data_tables.sql
+	"itemSlug", "rarityID", "categoryID", "sourceID", "sourcePage", "itemRequiresAttunement",
+	"itemHeader", "itemBaseRequirement",
 ];
 
 /** Bindings whose DB records every SQL string that gets prepared. */
@@ -46,7 +49,7 @@ function failingBindings(message: string) {
 beforeEach(seed);
 
 describe("migrations", () => {
-	it("creates the Item table with all 14 columns", async () => {
+	it("creates the Item table with its 14 columns plus the 8 from 0003", async () => {
 		const { results } = await env.DB.prepare("PRAGMA table_info(Item)").all<{ name: string }>();
 		expect(results.map((r) => r.name)).toEqual(ITEM_COLUMNS);
 	});
