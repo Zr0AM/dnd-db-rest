@@ -8,12 +8,14 @@ export default defineConfig({
 		cloudflareTest(async () => {
 			// Relative to the project root (where `npm test` is run)
 			const migrations = await readD1Migrations("migrations");
+			// SRD data files (seed/srd/*.sql), split into statements the same way
+			const srdSeeds = await readD1Migrations("seed/srd");
 			return {
 				wrangler: { configPath: "./wrangler.jsonc" },
 				// Never proxy bindings to the real Cloudflare account
 				remoteBindings: false,
 				miniflare: {
-					bindings: { TEST_MIGRATIONS: migrations },
+					bindings: { TEST_MIGRATIONS: migrations, TEST_SRD_SEEDS: srdSeeds },
 				},
 			};
 		}),

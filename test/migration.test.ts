@@ -7,9 +7,10 @@ beforeEach(seed);
 
 describe("migrations", () => {
 	it("applies every file in migrations/ in order", async () => {
-		expect(env.TEST_MIGRATIONS.map((m) => m.name)).toEqual(["0001_baseline.sql", "0002_item_id_guard.sql"]);
+		const names = ["0001_baseline.sql", "0002_item_id_guard.sql", "0003_game_data_tables.sql"];
+		expect(env.TEST_MIGRATIONS.map((m) => m.name)).toEqual(names);
 		const { results } = await env.DB.prepare("SELECT name FROM d1_migrations ORDER BY id").all<{ name: string }>();
-		expect(results.map((r) => r.name)).toEqual(["0001_baseline.sql", "0002_item_id_guard.sql"]);
+		expect(results.map((r) => r.name)).toEqual(names);
 	});
 
 	it("creates the two itemID guard triggers", async () => {
